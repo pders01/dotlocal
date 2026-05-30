@@ -1,0 +1,139 @@
+//go:build darwin
+
+package port80
+
+import (
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// macOS uses ifconfig for the alias IPs and pf for the redirect. Rather than
+// edit /etc/pf.conf, the redirect is loaded into the sub-anchor
+// "com.apple/<name>": the stock pf.conf already declares `rdr-anchor
+// "com.apple/*"`, whose wildcard evaluates every sub-anchor under com.apple/.
+// So loading rules there is enough for pf to apply them — no system file is
+// touched, and teardown is a flush of just our sub-anchor. (This is the same
+// hook Docker and various VPNs have historically used.)
+
+const supported = true
+
+func pfSubAnchor(name string) string { return "com.apple/" + name }
+
+func aliasAddArgs(a Alias) []string { return []string{a.Iface, "alias", a.AliasIP, a.Mask} }
+func aliasDelArgs(a Alias) []string { return []string{a.Iface, "-alias", a.AliasIP} }
+
+// renderPFAnchor is the rdr ruleset for the sub-anchor: one rule per alias,
+// redirecting that alias IP's public port to the service's unprivileged port
+// on the loopback (a 0.0.0.0-bound server receives it). Pure for testing.
+func renderPFAnchor(o *Options) string {
+	var b strings.Builder
+	for _, a := range o.Aliases {
+		fmt.Fprintf(&b, "rdr pass on %s inet proto tcp from any to %s port %d -> 127.0.0.1 port %d\n",
+			a.Iface, a.AliasIP, o.Port, o.ToPort)
+	}
+	return b.String()
+}
+
+func applyUp(o *Options) (*State, error) {
+	st := &State{Options: *o, Backend: "pf"}
+	added := make([]Alias, 0, len(o.Aliases))
+	for _, a := range o.Aliases {
+		if err := run("ifconfig", aliasAddArgs(a)...); err != nil {
+			for _, done := range added {
+				_ = run("ifconfig", aliasDelArgs(done)...)
+			}
+			return nil, fmt.Errorf("adding alias IP %s: %w", a.AliasIP, err)
+		}
+		added = append(added, a)
+	}
+	if err := installPFRedirect(o, st); err != nil {
+		for _, a := range added {
+			_ = run("ifconfig", aliasDelArgs(a)...)
+		}
+		return nil, err
+	}
+	return st, nil
+}
+
+// installPFRedirect loads the redirects into the com.apple/<name> sub-anchor
+// and enables pf, recording the enable token. It first verifies the stock
+// wildcard rdr-anchor is present, since without it the sub-anchor would load
+// but never be evaluated.
+func installPFRedirect(o *Options, st *State) error {
+	anchor := pfSubAnchor(o.Name)
+	if err := ensureAppleRdrAnchor(); err != nil {
+		return err
+	}
+	if err := pfLoadAnchor(anchor, renderPFAnchor(o)); err != nil {
+		return err
+	}
+	tok, err := output("pfctl", "-E")
+	if err != nil {
+		_ = run("pfctl", "-a", anchor, "-F", "all") // unload what we just added
+		return fmt.Errorf("enabling pf: %w", err)
+	}
+	st.PFToken = parsePFToken(tok)
+	return nil
+}
+
+// ensureAppleRdrAnchor checks that the loaded ruleset references the
+// `com.apple/*` rdr-anchor that evaluates our sub-anchor.
+func ensureAppleRdrAnchor() error {
+	out, err := output("pfctl", "-sn")
+	if err != nil {
+		return fmt.Errorf("reading pf ruleset: %w", err)
+	}
+	if !strings.Contains(out, "com.apple/*") {
+		return fmt.Errorf("this Mac's pf ruleset has no `rdr-anchor \"com.apple/*\"`, so the " +
+			"redirect anchor would never be evaluated; restore the stock /etc/pf.conf and reload it " +
+			"(sudo pfctl -f /etc/pf.conf)")
+	}
+	return nil
+}
+
+// pfLoadAnchor loads rules into the given sub-anchor via stdin.
+func pfLoadAnchor(anchor, rules string) error {
+	cmd := exec.Command("pfctl", "-a", anchor, "-f", "-")
+	cmd.Stdin = strings.NewReader(rules)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("loading pf anchor %s: %w: %s", anchor, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func applyDown(s *State) error {
+	var firstErr error
+	note := func(e error) {
+		if e != nil && firstErr == nil {
+			firstErr = e
+		}
+	}
+	if err := run("pfctl", "-a", pfSubAnchor(s.Name), "-F", "all"); err != nil {
+		note(fmt.Errorf("flushing pf anchor: %w", err))
+	}
+	if s.PFToken != "" {
+		_ = run("pfctl", "-X", s.PFToken)
+	} else {
+		_ = run("pfctl", "-d")
+	}
+	for _, a := range s.Aliases {
+		if err := run("ifconfig", aliasDelArgs(a)...); err != nil {
+			note(fmt.Errorf("removing alias IP %s: %w", a.AliasIP, err))
+		}
+	}
+	return firstErr
+}
+
+// parsePFToken extracts the enable-reference token from `pfctl -E` output,
+// whose relevant line reads "Token : 1234567890".
+func parsePFToken(out string) string {
+	for line := range strings.SplitSeq(out, "\n") {
+		if i := strings.Index(line, "Token"); i >= 0 {
+			if c := strings.Index(line[i:], ":"); c >= 0 {
+				return strings.TrimSpace(line[i+c+1:])
+			}
+		}
+	}
+	return ""
+}
