@@ -222,13 +222,15 @@ func Down(name string) (*State, error) {
 	if st.PFToken != "" && !isToken(st.PFToken, "") {
 		return nil, fmt.Errorf("refusing to act on invalid pf token in state %s", name)
 	}
-	if err := applyDown(st); err != nil {
-		return st, err
-	}
+	applyErr := applyDown(st)
+	// Always clear the recorded state, even if teardown reported a non-fatal
+	// error (e.g. pf was reloaded out from under us and the enable token is
+	// stale). Otherwise the binding looks "active" forever and Up refuses to
+	// run — leaving no way to recover without deleting the file by hand.
 	if err := clearState(name); err != nil {
 		return st, fmt.Errorf("removing state file: %w", err)
 	}
-	return st, nil
+	return st, applyErr
 }
 
 // Status returns the active binding for name, or ErrNoBinding if none.

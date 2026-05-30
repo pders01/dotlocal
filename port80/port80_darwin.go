@@ -63,6 +63,10 @@ func applyUp(o *Options) (*State, error) {
 	st := &State{Options: *o, Backend: "pf"}
 	added := make([]Alias, 0, len(o.Aliases))
 	for _, a := range o.Aliases {
+		// Clear any stale host route for this IP first: a REJECT route orphaned
+		// by an earlier run (or a removed alias) would otherwise shadow the new
+		// alias and drop all traffic to it.
+		_ = run("route", "-n", "delete", a.AliasIP)
 		if err := run("ifconfig", aliasAddArgs(a)...); err != nil {
 			for _, done := range added {
 				_ = run("ifconfig", aliasDelArgs(done)...)
@@ -133,20 +137,25 @@ func applyDown(s *State) error {
 			firstErr = e
 		}
 	}
-	if err := run("pfctl", "-a", pfSubAnchor(s.Name), "-F", "all"); err != nil {
-		note(fmt.Errorf("flushing pf anchor: %w", err))
-	}
+	// Flush our sub-anchor's rules — this is what actually removes the
+	// redirect; everything below is cleanup.
+	_ = run("pfctl", "-a", pfSubAnchor(s.Name), "-F", "all")
+	// Drop our enable reference, best-effort: the token can be invalid if pf
+	// was reloaded since Up, and a failure here must not abort teardown (the
+	// redirect is already gone above). Surfacing it would otherwise leave the
+	// state file uncleared and block the next Up.
 	if s.PFToken != "" {
-		if err := run("pfctl", "-X", s.PFToken); err != nil {
-			note(fmt.Errorf("releasing pf enable reference: %w", err))
-		}
-	} else if err := run("pfctl", "-d"); err != nil {
-		note(fmt.Errorf("disabling pf: %w", err))
+		_ = run("pfctl", "-X", s.PFToken)
+	} else {
+		_ = run("pfctl", "-d")
 	}
 	for _, a := range s.Aliases {
 		if err := run("ifconfig", aliasDelArgs(a)...); err != nil {
 			note(fmt.Errorf("removing alias IP %s: %w", a.AliasIP, err))
 		}
+		// Drop the cloned host route too; ifconfig usually removes it, but a
+		// route left behind would shadow a future alias for the same IP.
+		_ = run("route", "-n", "delete", a.AliasIP)
 	}
 	return firstErr
 }
