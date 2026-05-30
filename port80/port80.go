@@ -16,8 +16,9 @@
 //
 // Up/Down need root (interface + firewall changes); they are meant for a
 // privileged CLI step separate from running the unprivileged server. State is
-// recorded under ~/.<name>/port80.json so Down reverses the exact change. The
-// binding is not reboot-persistent; re-run Up after a reboot.
+// recorded under the root-owned /var/run/dotlocal/<name>.json so Down reverses
+// the exact change. The binding is not reboot-persistent; re-run Up after a
+// reboot.
 package port80
 
 import (
@@ -229,17 +230,21 @@ func requireRoot() error {
 	return nil
 }
 
+// stateDir is a root-owned system directory, deliberately NOT the invoking
+// user's $HOME: under sudo, $HOME stays user-owned, so writing root state there
+// is a TOCTOU/tamper vector (a local user could pre-seed or swap the file that
+// Down later feeds to root commands). /var/run is root-owned and cleared on
+// reboot — which matches port80's non-persistent binding. It is a var only so
+// tests can redirect it to a temp dir; production never reassigns it.
+var stateDir = "/var/run/dotlocal"
+
 func statePath(name string) (string, error) {
 	// Guard here too: name reaches statePath via Down/Status without going
 	// through validate(), and it becomes a filesystem path.
 	if !isToken(name, "_-") {
 		return "", fmt.Errorf("invalid name %q", name)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "."+name, "port80.json"), nil
+	return filepath.Join(stateDir, name+".json"), nil
 }
 
 func saveState(s *State) error {
@@ -247,14 +252,14 @@ func saveState(s *State) error {
 	if err != nil {
 		return err
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(p), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(p), 0o700); mkErr != nil {
 		return mkErr
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o644)
+	return os.WriteFile(p, b, 0o600)
 }
 
 func loadState(name string) (*State, error) {

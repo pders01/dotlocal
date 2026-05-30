@@ -69,7 +69,8 @@ func TestDetectIfaceErrors(t *testing.T) {
 }
 
 func TestStateRoundTrip(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	stateDir = t.TempDir()
+	t.Cleanup(func() { stateDir = "/var/run/dotlocal" })
 	if _, err := loadState("fwrd"); !errors.Is(err, ErrNoBinding) {
 		t.Fatalf("loadState empty: %v", err)
 	}

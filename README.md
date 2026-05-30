@@ -59,8 +59,9 @@ ips := []net.IP{net.ParseIP("192.168.1.240"), net.ParseIP("192.168.178.240")}
 adv, _ := mdns.AdvertiseScoped("fwrd", 80, ips, mdns.Options{})
 ```
 
-`port80.Up`/`Down` need root, record state under `~/.<name>/port80.json`, and
-are **not** reboot-persistent (re-run after a reboot). `port80.DetectIface`
+`port80.Up`/`Down` need root, record state under the root-owned
+`/var/run/dotlocal/<name>.json` (0600), and are **not** reboot-persistent
+(re-run after a reboot). `port80.DetectIface`
 derives the interface from an alias IP's subnet so callers can make `--iface`
 optional. Linux and macOS only; `Supported()` reports availability.
 
