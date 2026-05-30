@@ -35,16 +35,13 @@ mDNS, serves, and shuts down gracefully when the context is cancelled.
 - **Coexists with the OS.** On Linux the self-hosted responder shares the
   multicast socket with Avahi (`SO_REUSEADDR`). On **macOS** a self-hosted
   responder does *not* interoperate with the system `mDNSResponder` (its records
-  never resolve), so dotlocal drives Bonjour via `dns-sd` instead.
+  never resolve), so dotlocal registers with it directly via the `dns_sd` C API
+  (`DNSServiceRegisterRecord`), one shared A record per LAN. Multi-LAN works on
+  both platforms.
 
-### macOS multi-LAN caveat
-
-On macOS the name is registered through the system responder with `dns-sd -P`,
-which takes one address per registration; registering the same `<name>.local`
-twice (once per LAN) conflicts, so on a multi-homed host the name currently
-resolves on **one** LAN only. Single-LAN and Linux multi-LAN are unaffected.
-True macOS multi-LAN needs one registration with several A records
-(`DNSServiceRegisterRecord`, i.e. cgo) — a planned follow-up.
+> **macOS builds require cgo** (`CGO_ENABLED=1` and a C compiler — the Xcode
+> Command Line Tools). The `dns_sd` symbols are in libSystem, so no extra
+> linker flags are needed. Linux and other platforms are pure Go.
 
 ## Port 80 — bare `http://<name>.local`
 
@@ -96,8 +93,10 @@ go run ./examples/embedserve
 
 ## Requirements
 
-Go 1.24+. The `port80` subpackage is Linux/macOS only (`port80.Supported()`
-reports availability) and its `Up`/`Down` require root.
+Go 1.24+. macOS builds require cgo (`CGO_ENABLED=1` + a C compiler) for the
+mDNS backend; Linux and other platforms are pure Go. The `port80` subpackage is
+Linux/macOS only (`port80.Supported()` reports availability) and its `Up`/`Down`
+require root.
 
 ## Status
 
