@@ -134,8 +134,8 @@ func isToken(s, extra string) bool {
 }
 
 func (o *Options) validate() error {
-	// Name becomes a directory, an nftables table, and a pf anchor segment, so
-	// restrict it to a path- and shell-safe charset.
+	// Name becomes a directory (~/.<name>), an nftables table, and a pf anchor
+	// segment, so restrict it to a path- and shell-safe charset.
 	if !isToken(o.Name, "_-") {
 		return fmt.Errorf("Name %q must be non-empty and only contain letters, digits, '_' or '-'", o.Name)
 	}
@@ -211,6 +211,17 @@ func Down(name string) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Defence in depth: the state file's values become root command arguments
+	// below, so reject a tampered/garbage file rather than feeding it to
+	// ifconfig/ip/nft.
+	if verr := st.Options.validate(); verr != nil {
+		return nil, fmt.Errorf("refusing to act on invalid state %s: %w", name, verr)
+	}
+	// PFToken (macOS) becomes a `pfctl -X <token>` argument; it is a decimal
+	// reference token, so reject anything non-alphanumeric from the file.
+	if st.PFToken != "" && !isToken(st.PFToken, "") {
+		return nil, fmt.Errorf("refusing to act on invalid pf token in state %s", name)
+	}
 	if err := applyDown(st); err != nil {
 		return st, err
 	}
@@ -234,8 +245,9 @@ func requireRoot() error {
 // user's $HOME: under sudo, $HOME stays user-owned, so writing root state there
 // is a TOCTOU/tamper vector (a local user could pre-seed or swap the file that
 // Down later feeds to root commands). /var/run is root-owned and cleared on
-// reboot — which matches port80's non-persistent binding. It is a var only so
-// tests can redirect it to a temp dir; production never reassigns it.
+// reboot — which matches port80's non-persistent binding.
+// stateDir is a var only so tests can redirect it to a temp dir; production
+// never reassigns it.
 var stateDir = "/var/run/dotlocal"
 
 func statePath(name string) (string, error) {

@@ -20,6 +20,16 @@ const supported = true
 
 func pfSubAnchor(name string) string { return "com.apple/" + name }
 
+// output runs a command and returns combined stdout+stderr, for callers that
+// need to parse a result (e.g. pfctl -E's enable-reference token).
+func output(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
 func aliasAddArgs(a Alias) []string { return []string{a.Iface, "alias", a.AliasIP, a.Mask} }
 func aliasDelArgs(a Alias) []string { return []string{a.Iface, "-alias", a.AliasIP} }
 
@@ -113,9 +123,11 @@ func applyDown(s *State) error {
 		note(fmt.Errorf("flushing pf anchor: %w", err))
 	}
 	if s.PFToken != "" {
-		_ = run("pfctl", "-X", s.PFToken)
-	} else {
-		_ = run("pfctl", "-d")
+		if err := run("pfctl", "-X", s.PFToken); err != nil {
+			note(fmt.Errorf("releasing pf enable reference: %w", err))
+		}
+	} else if err := run("pfctl", "-d"); err != nil {
+		note(fmt.Errorf("disabling pf: %w", err))
 	}
 	for _, a := range s.Aliases {
 		if err := run("ifconfig", aliasDelArgs(a)...); err != nil {
@@ -131,7 +143,14 @@ func parsePFToken(out string) string {
 	for line := range strings.SplitSeq(out, "\n") {
 		if i := strings.Index(line, "Token"); i >= 0 {
 			if c := strings.Index(line[i:], ":"); c >= 0 {
-				return strings.TrimSpace(line[i+c+1:])
+				tok := strings.TrimSpace(line[i+c+1:])
+				// A pf enable-reference token is a decimal integer. Anything
+				// else means we misparsed; store nothing rather than a value
+				// that would later be handed to `pfctl -X`.
+				if tok != "" && strings.IndexFunc(tok, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+					return tok
+				}
+				return ""
 			}
 		}
 	}

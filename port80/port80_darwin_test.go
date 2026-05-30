@@ -33,6 +33,11 @@ func TestParsePFToken(t *testing.T) {
 	if got := parsePFToken("pf enabled\n"); got != "" {
 		t.Fatalf("parsePFToken empty = %q", got)
 	}
+	// Non-numeric content after the colon must be rejected (it would otherwise
+	// become a `pfctl -X <token>` argument).
+	if got := parsePFToken("Token : 999 ; rm -rf /\n"); got != "" {
+		t.Fatalf("parsePFToken garbage = %q, want empty", got)
+	}
 }
 
 func TestRenderPFAnchorContains(t *testing.T) {
