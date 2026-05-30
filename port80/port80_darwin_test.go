@@ -13,10 +13,18 @@ func TestRenderPFAnchorMultiAlias(t *testing.T) {
 		{Iface: "en9", AliasIP: "192.168.178.240"},
 	}}
 	got := renderPFAnchor(o)
-	want := "rdr pass on en0 inet proto tcp from any to 192.168.1.240 port 80 -> 127.0.0.1 port 5336\n" +
-		"rdr pass on en9 inet proto tcp from any to 192.168.178.240 port 80 -> 127.0.0.1 port 5336\n"
+	want := "rdr pass on en0 inet proto tcp from any to 192.168.1.240 port 80 -> 192.168.1.240 port 5336\n" +
+		"rdr pass on en9 inet proto tcp from any to 192.168.178.240 port 80 -> 192.168.178.240 port 5336\n"
 	if got != want {
 		t.Fatalf("renderPFAnchor:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestAliasAddArgsUsesNetmaskKeyword(t *testing.T) {
+	got := strings.Join(aliasAddArgs(Alias{Iface: "en0", AliasIP: "192.168.1.240", Mask: "255.255.255.0"}), " ")
+	want := "en0 alias 192.168.1.240 netmask 255.255.255.0"
+	if got != want {
+		t.Fatalf("aliasAddArgs = %q, want %q", got, want)
 	}
 }
 
@@ -42,7 +50,7 @@ func TestParsePFToken(t *testing.T) {
 
 func TestRenderPFAnchorContains(t *testing.T) {
 	o := &Options{Name: "x", Port: 80, ToPort: 8080, Aliases: []Alias{{Iface: "en0", AliasIP: "10.0.0.5"}}}
-	if !strings.Contains(renderPFAnchor(o), "to 10.0.0.5 port 80 -> 127.0.0.1 port 8080") {
+	if !strings.Contains(renderPFAnchor(o), "to 10.0.0.5 port 80 -> 10.0.0.5 port 8080") {
 		t.Fatal("rdr rule missing expected redirect")
 	}
 }
