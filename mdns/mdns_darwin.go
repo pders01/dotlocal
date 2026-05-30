@@ -52,10 +52,16 @@ func startResponder(name, host string, port int, info, ifaceName string, ips []n
 	cHost := C.CString(fqdn)
 	defer C.free(unsafe.Pointer(cHost))
 
-	var ifindex C.uint32_t
-	if ifi, err := net.InterfaceByName(ifaceName); err == nil {
-		ifindex = C.uint32_t(ifi.Index)
+	// Resolve the interface index up front: a zero index is
+	// kDNSServiceInterfaceIndexAny, which would register the A record on every
+	// interface and silently defeat the per-LAN scoping this whole design rests
+	// on. Fail loudly instead of advertising on the wrong segments.
+	ifi, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		C.DNSServiceRefDeallocate(ref)
+		return nil, fmt.Errorf("mdns: looking up interface %s: %w", ifaceName, err)
 	}
+	ifindex := C.uint32_t(ifi.Index)
 
 	for _, ip := range ips {
 		ip4 := ip.To4()
