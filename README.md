@@ -83,7 +83,16 @@ device:
 go run ./examples/embedserve
 ```
 
+## Requirements
+
+Go 1.24+. The `port80` subpackage is Linux/macOS only (`port80.Supported()`
+reports availability) and its `Up`/`Down` require root.
+
 ## Status
 
 Extracted from [fwrd](https://github.com/pders01/fwrd). A `service` package
 (install as a systemd/launchd user service) is planned.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
