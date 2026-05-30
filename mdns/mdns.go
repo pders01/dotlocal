@@ -12,6 +12,7 @@
 package mdns
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -156,16 +157,16 @@ func (a *Advertiser) Close() error {
 	if a == nil {
 		return nil
 	}
-	var firstErr error
+	var errs []error
 	for _, s := range a.servers {
 		if s == nil {
 			continue
 		}
-		if err := s.Shutdown(); err != nil && firstErr == nil {
-			firstErr = err
+		if err := s.Shutdown(); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 // virtualPrefixes are interface-name prefixes for tunnels, VM/container
