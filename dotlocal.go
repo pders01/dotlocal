@@ -30,6 +30,22 @@ import (
 // after the context is cancelled before forcing connections closed.
 const shutdownGrace = 15 * time.Second
 
+// validLabel reports whether s is a valid single DNS label: 1–63 characters of
+// letters, digits, or hyphens, not starting or ending with a hyphen. The name
+// becomes the <name>.local host, so this keeps malformed input out of the mDNS
+// records (and out of the hashicorp/mdns library).
+func validLabel(s string) bool {
+	if len(s) == 0 || len(s) > 63 || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // Config configures Run. Only Name and Handler are required.
 type Config struct {
 	Name       string       // bare label, e.g. "fwrd" → advertised as fwrd.local
@@ -58,8 +74,8 @@ type Ready struct {
 // It returns nil on a clean shutdown. A bind failure (e.g. the port is in use)
 // is returned immediately, before anything is advertised.
 func Run(ctx context.Context, c Config) error {
-	if c.Name == "" {
-		return errors.New("dotlocal: Name is required")
+	if !validLabel(c.Name) {
+		return fmt.Errorf("dotlocal: Name %q must be a DNS label (1–63 letters/digits/hyphens, no leading or trailing hyphen)", c.Name)
 	}
 	if c.Handler == nil {
 		return errors.New("dotlocal: Handler is required")
