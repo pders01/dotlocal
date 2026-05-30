@@ -14,6 +14,51 @@ func TestApplyDefaults(t *testing.T) {
 	if o.Aliases[0].Prefix != 24 || o.Aliases[0].Mask != "255.255.255.0" {
 		t.Fatalf("alias defaults: %+v", o.Aliases[0])
 	}
+	// Ports defaults to {Port} and Port stays equal to Ports[0].
+	if len(o.Ports) != 1 || o.Ports[0] != 80 || o.Port != o.Ports[0] {
+		t.Fatalf("ports default: %+v", o)
+	}
+}
+
+func TestApplyDefaultsPortsFromPort(t *testing.T) {
+	// An Options{Port: 80} with no Ports yields Ports == [80] (back-compat).
+	o := Options{Port: 80, Aliases: []Alias{{}}}
+	o.applyDefaults()
+	if len(o.Ports) != 1 || o.Ports[0] != 80 || o.Port != 80 {
+		t.Fatalf("Ports from Port: %+v", o)
+	}
+}
+
+func TestApplyDefaultsPortsExplicit(t *testing.T) {
+	// An explicit Ports set is preserved and Port is normalized to Ports[0].
+	o := Options{Ports: []int{443, 80}, Aliases: []Alias{{}}}
+	o.applyDefaults()
+	if len(o.Ports) != 2 || o.Ports[0] != 443 || o.Ports[1] != 80 {
+		t.Fatalf("explicit Ports: %+v", o.Ports)
+	}
+	if o.Port != 443 {
+		t.Fatalf("Port should equal Ports[0]=443, got %d", o.Port)
+	}
+}
+
+func TestApplyDefaultsDeDups(t *testing.T) {
+	// Duplicates are removed while order is preserved.
+	o := Options{Ports: []int{80, 443, 80, 443, 80}, Aliases: []Alias{{}}}
+	o.applyDefaults()
+	if len(o.Ports) != 2 || o.Ports[0] != 80 || o.Ports[1] != 443 {
+		t.Fatalf("de-dup: %+v", o.Ports)
+	}
+	if o.Port != 80 {
+		t.Fatalf("Port should equal Ports[0]=80, got %d", o.Port)
+	}
+}
+
+func TestValidateRejectsOutOfRangePortInSet(t *testing.T) {
+	o := Options{Name: "x", ToPort: 8080, Ports: []int{80, 70000},
+		Aliases: []Alias{{Iface: "en0", AliasIP: "192.168.1.240", Prefix: 24, Mask: "255.255.255.0"}}}
+	if err := o.validate(); err == nil {
+		t.Fatal("expected rejection of out-of-range port 70000 in the set")
+	}
 }
 
 func TestValidate(t *testing.T) {

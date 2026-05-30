@@ -42,19 +42,22 @@ func aliasAddArgs(a Alias) []string {
 }
 func aliasDelArgs(a Alias) []string { return []string{a.Iface, "-alias", a.AliasIP} }
 
-// renderPFAnchor is the rdr ruleset for the sub-anchor: one rule per alias,
-// redirecting that alias IP's public port to the service's unprivileged port.
-// The redirect target is the alias IP itself (port translation only), NOT
-// 127.0.0.1: a packet that arrives on a physical interface and is redirected
-// to a loopback address is dropped by macOS as a martian, so loopback works
-// only for host-local traffic. Keeping the destination on the alias IP (which
-// a 0.0.0.0-bound server also accepts) delivers LAN traffic correctly. Pure
-// for testing.
+// renderPFAnchor is the rdr ruleset for the sub-anchor: one rule per
+// (alias × public port), redirecting each alias IP's public ports to the
+// service's single unprivileged port. The redirect target is the alias IP
+// itself (port translation only), NOT 127.0.0.1: a packet that arrives on a
+// physical interface and is redirected to a loopback address is dropped by
+// macOS as a martian, so loopback works only for host-local traffic. Keeping
+// the destination on the alias IP (which a 0.0.0.0-bound server also accepts)
+// delivers LAN traffic correctly. Rules are emitted aliases-outer,
+// ports-inner for a stable order. Pure for testing.
 func renderPFAnchor(o *Options) string {
 	var b strings.Builder
 	for _, a := range o.Aliases {
-		fmt.Fprintf(&b, "rdr pass on %s inet proto tcp from any to %s port %d -> %s port %d\n",
-			a.Iface, a.AliasIP, o.Port, a.AliasIP, o.ToPort)
+		for _, p := range o.Ports {
+			fmt.Fprintf(&b, "rdr pass on %s inet proto tcp from any to %s port %d -> %s port %d\n",
+				a.Iface, a.AliasIP, p, a.AliasIP, o.ToPort)
+		}
 	}
 	return b.String()
 }

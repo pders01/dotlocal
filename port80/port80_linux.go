@@ -43,6 +43,19 @@ func nftDelTableArgs(table string) []string {
 	return []string{"delete", "table", "ip", table}
 }
 
+// nftRuleSteps builds one nft add-rule invocation per (alias × public port),
+// redirecting each alias IP's public ports to the single ToPort. Aliases-outer,
+// ports-inner for a stable order. Pure for testing.
+func nftRuleSteps(table string, o *Options) [][]string {
+	steps := make([][]string, 0, len(o.Aliases)*len(o.Ports))
+	for _, a := range o.Aliases {
+		for _, p := range o.Ports {
+			steps = append(steps, nftAddRuleArgs(table, a, p, o.ToPort))
+		}
+	}
+	return steps
+}
+
 func applyUp(o *Options) (*State, error) {
 	st := &State{Options: *o, Backend: "nftables"}
 	table := o.Name
@@ -62,9 +75,7 @@ func applyUp(o *Options) (*State, error) {
 	}
 
 	steps := [][]string{nftAddTableArgs(table), nftAddChainArgs(table)}
-	for _, a := range o.Aliases {
-		steps = append(steps, nftAddRuleArgs(table, a, o.Port, o.ToPort))
-	}
+	steps = append(steps, nftRuleSteps(table, o)...)
 	for _, args := range steps {
 		if err := run("nft", args...); err != nil {
 			rollback()

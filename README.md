@@ -53,6 +53,11 @@ socket lookup, so it works even when the host binds `0.0.0.0:80`, and never
 touches the host's own port-80 traffic. macOS uses the stock
 `rdr-anchor "com.apple/*"` sub-anchor, so `/etc/pf.conf` is never modified.
 
+Redirect **more than one** public port onto the same app port with `Ports`,
+e.g. `Ports: []int{80, 443}` so bare `https://<name>.local` works alongside
+`http://`. One app port serves both; the app distinguishes TLS from cleartext
+itself. The scalar `Port` is kept for back-compat and equals `Ports[0]`.
+
 ```go
 // privileged step (root), e.g. from your CLI's `net up`:
 st, _ := port80.Up(port80.Options{
@@ -79,7 +84,7 @@ optional. Linux and macOS only; `Supported()` reports availability.
 |---|---|
 | `dotlocal` | `Run(ctx, Config)` — bind + advertise + serve + graceful shutdown |
 | `dotlocal/mdns` | scoped multi-interface `<name>.local` advertising (`Advertise`, `AdvertiseScoped`) |
-| `dotlocal/port80` | alias IP + firewall redirect for bare port 80 (root) |
+| `dotlocal/port80` | alias IP + firewall redirect for bare public port(s) — 80, optionally 443 (root) |
 
 ## Example
 

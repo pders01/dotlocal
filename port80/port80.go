@@ -1,15 +1,17 @@
-// Package port80 makes a service reachable at http://<name>.local on the
-// standard HTTP port (80) without binding a privileged port and without
-// colliding with any server the host already runs on port 80.
+// Package port80 makes a service reachable at http://<name>.local on one or
+// more standard public ports (80 by default, optionally 443 as well) without
+// binding a privileged port and without colliding with any server the host
+// already runs on those ports.
 //
 // It works at the network layer rather than in the web server:
 //
 //  1. A dedicated alias IP is added to a LAN interface (one per LAN), giving
 //     the service its own address on the segment, distinct from the host's.
-//  2. A firewall redirect (pf on macOS, nftables on Linux) rewrites that alias
-//     IP's port 80 to the service's unprivileged port in the kernel
-//     PREROUTING/rdr path — before the socket lookup, so it works even when the
-//     host already binds 0.0.0.0:80, and never touches the host's own :80.
+//  2. A firewall redirect (pf on macOS, nftables on Linux) rewrites each of
+//     that alias IP's public ports to the service's single unprivileged port in
+//     the kernel PREROUTING/rdr path — before the socket lookup, so it works
+//     even when the host already binds 0.0.0.0:80, and never touches the host's
+//     own public ports.
 //
 // Advertise the alias IPs over mDNS (see dotlocal/mdns.AdvertiseScoped) so
 // <name>.local resolves to the redirect target on whichever LAN a client is on.
@@ -32,7 +34,7 @@ import (
 )
 
 // Alias is one dedicated IP to give the service on a specific interface — one
-// per LAN, so port 80 can be reached as <name>.local on each.
+// per LAN, so the public ports can be reached as <name>.local on each.
 type Alias struct {
 	Iface   string `json:"iface"`    // LAN interface, e.g. "en0" (macOS) or "eth0" (Linux)
 	AliasIP string `json:"alias_ip"` // dedicated IP to add on that interface
@@ -44,8 +46,9 @@ type Alias struct {
 type Options struct {
 	Name    string  `json:"name"`    // identifies the firewall anchor/table and state file
 	Aliases []Alias `json:"aliases"` // one or more dedicated alias IPs, one per LAN
-	Port    int     `json:"port"`    // public port to redirect from; default 80
-	ToPort  int     `json:"to_port"` // the service's unprivileged port; default 8080
+	Port    int     `json:"port"`    // public port to redirect from; default 80. Kept for back-compat; equals Ports[0] after applyDefaults
+	Ports   []int   `json:"ports"`   // set of public ports to redirect onto ToPort; defaults to {Port}
+	ToPort  int     `json:"to_port"` // the service's single unprivileged port; default 8080
 }
 
 // State is the persisted record of an applied Up, enough to reverse it.
@@ -102,6 +105,23 @@ func (o *Options) applyDefaults() {
 	if o.ToPort == 0 {
 		o.ToPort = 8080
 	}
+	// Default the port set from the single Port for back-compat, then de-dup
+	// while preserving order. Keep Port == Ports[0] so any reader still using
+	// the scalar field sees a consistent value.
+	if len(o.Ports) == 0 {
+		o.Ports = []int{o.Port}
+	}
+	seen := make(map[int]struct{}, len(o.Ports))
+	deduped := o.Ports[:0]
+	for _, p := range o.Ports {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		deduped = append(deduped, p)
+	}
+	o.Ports = deduped
+	o.Port = o.Ports[0]
 	for i := range o.Aliases {
 		if o.Aliases[i].Prefix == 0 {
 			o.Aliases[i].Prefix = 24
@@ -165,8 +185,20 @@ func (o *Options) validate() error {
 			return fmt.Errorf("mask %q for %s is not a contiguous netmask", a.Mask, a.AliasIP)
 		}
 	}
-	if o.Port < 1 || o.Port > 65535 || o.ToPort < 1 || o.ToPort > 65535 {
-		return fmt.Errorf("ports must be 1–65535 (got port=%d to-port=%d)", o.Port, o.ToPort)
+	// Validate the effective public-port set. validate may run before
+	// applyDefaults (e.g. on freshly built Options), so fall back to the scalar
+	// Port when Ports is empty — applyDefaults derives Ports from it anyway.
+	ports := o.Ports
+	if len(ports) == 0 {
+		ports = []int{o.Port}
+	}
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("public ports must be 1–65535 (got %d)", p)
+		}
+	}
+	if o.ToPort < 1 || o.ToPort > 65535 {
+		return fmt.Errorf("to-port must be 1–65535 (got %d)", o.ToPort)
 	}
 	return nil
 }
