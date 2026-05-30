@@ -30,11 +30,15 @@ func output(name string, args ...string) (string, error) {
 	return string(out), nil
 }
 
-// aliasAddArgs uses the explicit `netmask` keyword: macOS ifconfig otherwise
-// misparses a positional mask (`alias <ip> <mask>`), producing an alias with a
-// REJECT route that drops all traffic to it.
+// aliasAddArgs adds the alias as a host route (/32), not the LAN's subnet
+// mask. The alias IP is always in a subnet the interface already carries (the
+// caller derives the interface from the IP's subnet), and macOS rejects a
+// second address with that subnet's mask — it installs a REJECT route that
+// drops all traffic to the alias. A /32 (255.255.255.255) gives it a clean
+// host route instead; LAN clients still reach it via ARP on the interface.
+// The `netmask` keyword is explicit because a positional mask is misparsed.
 func aliasAddArgs(a Alias) []string {
-	return []string{a.Iface, "alias", a.AliasIP, "netmask", a.Mask}
+	return []string{a.Iface, "alias", a.AliasIP, "netmask", "255.255.255.255"}
 }
 func aliasDelArgs(a Alias) []string { return []string{a.Iface, "-alias", a.AliasIP} }
 

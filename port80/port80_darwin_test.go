@@ -20,9 +20,11 @@ func TestRenderPFAnchorMultiAlias(t *testing.T) {
 	}
 }
 
-func TestAliasAddArgsUsesNetmaskKeyword(t *testing.T) {
+func TestAliasAddArgsUsesHostMask(t *testing.T) {
+	// A /32 host alias avoids the same-subnet REJECT route on macOS; the
+	// caller's Mask is intentionally not used for the alias.
 	got := strings.Join(aliasAddArgs(Alias{Iface: "en0", AliasIP: "192.168.1.240", Mask: "255.255.255.0"}), " ")
-	want := "en0 alias 192.168.1.240 netmask 255.255.255.0"
+	want := "en0 alias 192.168.1.240 netmask 255.255.255.255"
 	if got != want {
 		t.Fatalf("aliasAddArgs = %q, want %q", got, want)
 	}
