@@ -92,9 +92,13 @@ func Run(ctx context.Context, c Config) error {
 	defer ln.Close()
 
 	var adv *mdns.Advertiser
-	ready := Ready{Addr: ln.Addr().String()}
+	boundAddr := ln.Addr().String()
+	ready := Ready{Addr: boundAddr}
 	if c.Advertise {
-		if _, portStr, perr := net.SplitHostPort(addr); perr == nil {
+		// Advertise the port the listener actually bound, not the one requested:
+		// with an ephemeral ":0" the requested addr carries port 0 while the OS
+		// picked a real one, and clients must be told the real port.
+		if _, portStr, perr := net.SplitHostPort(boundAddr); perr == nil {
 			if port, aerr := strconv.Atoi(portStr); aerr == nil {
 				adv, ready.AdvertiseErr = mdns.Advertise(c.Name, port,
 					mdns.Options{Info: c.Info, Interfaces: c.Interfaces})
@@ -102,7 +106,7 @@ func Run(ctx context.Context, c Config) error {
 				ready.AdvertiseErr = fmt.Errorf("invalid port %q: %w", portStr, aerr)
 			}
 		} else {
-			ready.AdvertiseErr = fmt.Errorf("cannot parse addr %q: %w", addr, perr)
+			ready.AdvertiseErr = fmt.Errorf("cannot parse addr %q: %w", boundAddr, perr)
 		}
 		if adv != nil {
 			ready.Name = c.Name + ".local"
