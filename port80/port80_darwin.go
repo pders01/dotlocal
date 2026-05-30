@@ -150,7 +150,7 @@ func applyDown(s *State) error {
 		_ = run("pfctl", "-d")
 	}
 	for _, a := range s.Aliases {
-		if err := run("ifconfig", aliasDelArgs(a)...); err != nil {
+		if err := run("ifconfig", aliasDelArgs(a)...); err != nil && !isAbsentAddr(err) {
 			note(fmt.Errorf("removing alias IP %s: %w", a.AliasIP, err))
 		}
 		// Drop the cloned host route too; ifconfig usually removes it, but a

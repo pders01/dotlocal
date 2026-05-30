@@ -85,7 +85,7 @@ func applyDown(s *State) error {
 		note(fmt.Errorf("removing nftables table: %w", err))
 	}
 	for _, a := range s.Aliases {
-		if err := run("ip", aliasDelArgs(a)...); err != nil {
+		if err := run("ip", aliasDelArgs(a)...); err != nil && !isAbsentAddr(err) {
 			note(fmt.Errorf("removing alias IP %s: %w", a.AliasIP, err))
 		}
 	}
