@@ -1,14 +1,17 @@
 // Package mdns advertises a service on the local network over multicast DNS,
 // so it is reachable at a stable <name>.local address without DNS, a hosts
-// entry, or a static IP. It is a thin wrapper over hashicorp/mdns.
+// entry, or a static IP.
 //
-// mDNS is link-local: it only works on the same LAN segment, and the
-// advertised A records point at the host's LAN interface addresses, not
-// loopback. On a multi-homed host, Advertise runs one responder per interface
-// (bound to that interface), so a query is answered with the address reachable
-// on the subnet it arrived from — <name>.local then resolves correctly on
-// every LAN the host is on, rather than handing a client an address on a
-// subnet it cannot route to.
+// The responder backend is platform-specific (see startResponder):
+//
+//   - Linux/other: a self-hosted responder (hashicorp/mdns), one per
+//     interface, which coexists with Avahi over the shared multicast socket.
+//   - macOS: the system mDNSResponder (Bonjour) is driven via `dns-sd`,
+//     because a second self-hosted responder on the box does not interoperate
+//     with Bonjour — its records never become resolvable.
+//
+// On a multi-homed host, advertising is scoped per interface so <name>.local
+// resolves to the address reachable on whichever LAN a client sits on.
 package mdns
 
 import (
@@ -17,8 +20,6 @@ import (
 	"net"
 	"slices"
 	"strings"
-
-	"github.com/hashicorp/mdns"
 )
 
 // Options tunes advertising. The zero value is valid.
@@ -38,33 +39,26 @@ func (o Options) info(name string) string {
 	return name + " (dotlocal)"
 }
 
-// Advertiser publishes an mDNS A record for <name>.local plus an _http._tcp
-// service record on a port, until Close is called. It may run more than one
-// underlying responder (one per interface).
+// Advertiser publishes <name>.local until Close is called. It may own several
+// underlying responders/registrations (one per interface).
 type Advertiser struct {
-	servers []*mdns.Server
 	// Host is the resolved fully-qualified name, e.g. "fwrd.local.".
 	Host string
 	// Targets lists the advertised addresses (e.g. "en0=192.168.1.5") for
 	// logging.
 	Targets []string
+	closers []func() error
 }
 
-// Advertise runs one responder per usable interface, each bound to its
-// interface and advertising only that interface's IPv4 address(es), so
-// <name>.local resolves to the reachable address on whichever LAN a client
-// sits on. name is the bare label (e.g. "fwrd"); the advertised name is
-// "<name>.local".
-//
-// It coexists with the OS responder (Bonjour/Avahi): the multicast socket sets
-// SO_REUSEADDR, and the two answer for different names.
+// Advertise advertises <name>.local on every LAN-candidate interface (or the
+// ones named in opts.Interfaces), scoped per interface.
 func Advertise(name string, port int, opts Options) (*Advertiser, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, fmt.Errorf("enumerating interfaces: %w", err)
 	}
-	host := name + ".local."
-	adv := &Advertiser{Host: host}
+	byIface := map[string][]net.IP{}
+	var order []string
 	for i := range ifaces {
 		ifi := ifaces[i]
 		if len(opts.Interfaces) > 0 {
@@ -78,24 +72,21 @@ func Advertise(name string, port int, opts Options) (*Advertiser, error) {
 		if len(ips) == 0 {
 			continue
 		}
-		if err := adv.addResponder(name, host, port, opts.info(name), ips, &ifi); err != nil {
-			_ = adv.Close()
-			return nil, err
-		}
+		byIface[ifi.Name] = ips
+		order = append(order, ifi.Name)
 	}
-	if len(adv.servers) == 0 {
+	if len(order) == 0 {
 		if len(opts.Interfaces) > 0 {
 			return nil, fmt.Errorf("none of the requested interfaces %v are up with an IPv4 address", opts.Interfaces)
 		}
 		return nil, fmt.Errorf("no up, non-loopback IPv4 interface to advertise on")
 	}
-	return adv, nil
+	return build(name, port, opts.info(name), byIface, order)
 }
 
-// AdvertiseScoped advertises each given IP on the interface whose subnet
-// contains it, one scoped responder per interface. Use it to publish dedicated
-// alias IPs (e.g. from a port-80 redirect), so on a multi-homed host
-// <name>.local resolves to the alias reachable on whichever LAN a client is on.
+// AdvertiseScoped advertises <name>.local for exactly the given IPs, each on
+// the interface whose subnet contains it. Use it to publish dedicated alias
+// IPs (e.g. from a port-80 redirect).
 func AdvertiseScoped(name string, port int, ips []net.IP, opts Options) (*Advertiser, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -117,52 +108,42 @@ func AdvertiseScoped(name string, port int, ips []net.IP, opts Options) (*Advert
 		}
 		byIface[ifn] = append(byIface[ifn], ip4)
 	}
-	if len(byIface) == 0 {
+	if len(order) == 0 {
 		return nil, fmt.Errorf("no usable IPv4 address to advertise on")
 	}
+	return build(name, port, opts.info(name), byIface, order)
+}
+
+// build creates one responder per interface via the platform's startResponder
+// and assembles the Advertiser.
+func build(name string, port int, info string, byIface map[string][]net.IP, order []string) (*Advertiser, error) {
 	host := name + ".local."
 	adv := &Advertiser{Host: host}
 	for _, ifn := range order {
-		ifi, err := net.InterfaceByName(ifn)
+		closer, err := startResponder(name, host, port, info, ifn, byIface[ifn])
 		if err != nil {
 			_ = adv.Close()
-			return nil, fmt.Errorf("looking up interface %s: %w", ifn, err)
-		}
-		if err := adv.addResponder(name, host, port, opts.info(name), byIface[ifn], ifi); err != nil {
-			_ = adv.Close()
 			return nil, err
+		}
+		adv.closers = append(adv.closers, closer)
+		for _, ip := range byIface[ifn] {
+			adv.Targets = append(adv.Targets, ifn+"="+ip.String())
 		}
 	}
 	return adv, nil
 }
 
-func (a *Advertiser) addResponder(name, host string, port int, info string, ips []net.IP, ifi *net.Interface) error {
-	svc, err := mdns.NewMDNSService(name, "_http._tcp", "local.", host, port, ips, []string{info})
-	if err != nil {
-		return fmt.Errorf("building mDNS service for %s: %w", ifi.Name, err)
-	}
-	srv, err := mdns.NewServer(&mdns.Config{Zone: svc, Iface: ifi})
-	if err != nil {
-		return fmt.Errorf("starting mDNS responder on %s: %w", ifi.Name, err)
-	}
-	a.servers = append(a.servers, srv)
-	for _, ip := range ips {
-		a.Targets = append(a.Targets, ifi.Name+"="+ip.String())
-	}
-	return nil
-}
-
-// Close stops every underlying responder. Safe to call on a nil Advertiser.
+// Close stops every responder/registration. Safe to call on a nil Advertiser.
 func (a *Advertiser) Close() error {
 	if a == nil {
 		return nil
 	}
 	var errs []error
-	for _, s := range a.servers {
-		if s == nil {
+	for _, c := range a.closers {
+		if c == nil {
 			continue
 		}
-		if err := s.Shutdown(); err != nil {
+		if err := c(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -218,8 +199,6 @@ func ifaceForIP(ifaces []net.Interface, ip net.IP) string {
 }
 
 // ifaceIPv4s returns the global-unicast IPv4 addresses of a single interface.
-// mDNS is link-local, so we stay IPv4-only to avoid publishing link-local
-// IPv6 (fe80::) records that many clients can't route to without a scope id.
 func ifaceIPv4s(ifi *net.Interface) []net.IP {
 	addrs, err := ifi.Addrs()
 	if err != nil {
