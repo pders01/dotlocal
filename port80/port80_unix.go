@@ -16,12 +16,19 @@ func isAbsentAddr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "assign requested address")
 }
 
-// run executes a command and folds combined output into the error so failures
-// are diagnosable without a separate logging path.
-func run(name string, args ...string) error {
+// output runs a command and returns combined stdout+stderr, folding a failure
+// into the error so it is diagnosable without a separate logging path. Callers
+// that need the output (e.g. parsing pfctl -E's enable token) use it directly.
+func output(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return string(out), nil
+}
+
+// run executes a command, discarding the output and surfacing only the error.
+func run(name string, args ...string) error {
+	_, err := output(name, args...)
+	return err
 }

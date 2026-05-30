@@ -20,16 +20,6 @@ const supported = true
 
 func pfSubAnchor(name string) string { return "com.apple/" + name }
 
-// output runs a command and returns combined stdout+stderr, for callers that
-// need to parse a result (e.g. pfctl -E's enable-reference token).
-func output(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
-}
-
 // aliasAddArgs adds the alias as a host route (/32), not the LAN's subnet
 // mask. The alias IP is always in a subnet the interface already carries (the
 // caller derives the interface from the IP's subnet), and macOS rejects a
