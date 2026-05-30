@@ -189,6 +189,13 @@ func (o *Options) validate() error {
 			return fmt.Errorf("public ports must be 1–65535 (got %d)", p)
 		}
 	}
+	// Port is a back-compat shadow of Ports[0]; reject a state where the two
+	// disagree (e.g. a hand-edited file) so the scalar a legacy reader trusts
+	// can never lie. applyDefaults keeps them in sync; this guards a State
+	// loaded straight from disk in Down.
+	if len(o.Ports) > 0 && o.Port != 0 && o.Port != o.Ports[0] {
+		return fmt.Errorf("Port %d must equal Ports[0]=%d", o.Port, o.Ports[0])
+	}
 	if o.ToPort < 1 || o.ToPort > 65535 {
 		return fmt.Errorf("to-port must be 1–65535 (got %d)", o.ToPort)
 	}

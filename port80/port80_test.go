@@ -85,6 +85,20 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsPortPortsMismatch(t *testing.T) {
+	// A state loaded from disk where the back-compat scalar disagrees with
+	// Ports[0] (e.g. hand-edited) must be rejected, not silently trusted.
+	o := Options{Name: "x", Port: 443, Ports: []int{80, 443}, ToPort: 8080,
+		Aliases: []Alias{{Iface: "en0", AliasIP: "192.168.1.240", Prefix: 24, Mask: "255.255.255.0"}}}
+	if err := o.validate(); err == nil {
+		t.Fatal("expected rejection of Port != Ports[0]")
+	}
+	o.Port = 80 // consistent Port == Ports[0] passes
+	if err := o.validate(); err != nil {
+		t.Fatalf("consistent Port/Ports rejected: %v", err)
+	}
+}
+
 func TestStatePathRejectsUnsafeName(t *testing.T) {
 	for _, bad := range []string{"", "../etc", "a/b", "x.y", "name with space", ".hidden"} {
 		if _, err := statePath(bad); err == nil {
