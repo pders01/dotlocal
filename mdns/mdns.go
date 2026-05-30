@@ -20,6 +20,8 @@ import (
 	"net"
 	"slices"
 	"strings"
+
+	"github.com/pders01/dotlocal/internal/lan"
 )
 
 // Options tunes advertising. The zero value is valid.
@@ -99,7 +101,7 @@ func AdvertiseScoped(name string, port int, ips []net.IP, opts Options) (*Advert
 		if ip4 == nil {
 			continue
 		}
-		ifn := ifaceForIP(ifaces, ip4)
+		ifn := lan.InterfaceForIP(ifaces, ip4)
 		if ifn == "" {
 			return nil, fmt.Errorf("no active interface has a subnet containing %s", ip4)
 		}
@@ -175,27 +177,6 @@ func isLANCandidate(ifi *net.Interface) bool {
 		}
 	}
 	return true
-}
-
-// ifaceForIP returns the name of the up, non-loopback interface whose subnet
-// contains ip, or "" if none does.
-func ifaceForIP(ifaces []net.Interface, ip net.IP) string {
-	for i := range ifaces {
-		ifi := ifaces[i]
-		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := ifi.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			if ipnet, ok := a.(*net.IPNet); ok && ipnet.Contains(ip) {
-				return ifi.Name
-			}
-		}
-	}
-	return ""
 }
 
 // ifaceIPv4s returns the global-unicast IPv4 addresses of a single interface.

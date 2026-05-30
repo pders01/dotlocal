@@ -31,6 +31,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pders01/dotlocal/internal/lan"
 )
 
 // Alias is one dedicated IP to give the service on a specific interface — one
@@ -80,20 +82,8 @@ func DetectIface(aliasIP string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for i := range ifaces {
-		ifi := ifaces[i]
-		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := ifi.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			if ipnet, ok := a.(*net.IPNet); ok && ipnet.Contains(ip) {
-				return ifi.Name, nil
-			}
-		}
+	if ifn := lan.InterfaceForIP(ifaces, ip); ifn != "" {
+		return ifn, nil
 	}
 	return "", fmt.Errorf("no active interface has a subnet containing %s", aliasIP)
 }
@@ -154,10 +144,12 @@ func isToken(s, extra string) bool {
 }
 
 func (o *Options) validate() error {
-	// Name becomes a directory (~/.<name>), an nftables table, and a pf anchor
-	// segment, so restrict it to a path- and shell-safe charset.
-	if !isToken(o.Name, "_-") {
-		return fmt.Errorf("Name %q must be non-empty and only contain letters, digits, '_' or '-'", o.Name)
+	// Name becomes the <name>.local host, an nftables table, a pf anchor
+	// segment, and a state-file path. A valid DNS label satisfies all of them at
+	// once (and is a strict subset of the path/shell-safe charset), so it is the
+	// single rule rather than a per-package variant.
+	if !lan.ValidLabel(o.Name) {
+		return fmt.Errorf("Name %q must be a DNS label (1–63 letters/digits/hyphens, no leading or trailing hyphen)", o.Name)
 	}
 	if len(o.Aliases) == 0 {
 		return fmt.Errorf("at least one alias IP is required")
