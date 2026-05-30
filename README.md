@@ -32,8 +32,19 @@ mDNS, serves, and shuts down gracefully when the context is cancelled.
   correctly whether a client is on the wired net, the Wi-Fi, or a guest AP, and
   never gets handed an address it can't route to. Virtual interfaces (VM/
   container bridges, VPN tunnels, AirDrop) are skipped automatically.
-- **Coexists with the OS.** The multicast socket sets `SO_REUSEADDR`, so it runs
-  alongside Bonjour/Avahi.
+- **Coexists with the OS.** On Linux the self-hosted responder shares the
+  multicast socket with Avahi (`SO_REUSEADDR`). On **macOS** a self-hosted
+  responder does *not* interoperate with the system `mDNSResponder` (its records
+  never resolve), so dotlocal drives Bonjour via `dns-sd` instead.
+
+### macOS multi-LAN caveat
+
+On macOS the name is registered through the system responder with `dns-sd -P`,
+which takes one address per registration; registering the same `<name>.local`
+twice (once per LAN) conflicts, so on a multi-homed host the name currently
+resolves on **one** LAN only. Single-LAN and Linux multi-LAN are unaffected.
+True macOS multi-LAN needs one registration with several A records
+(`DNSServiceRegisterRecord`, i.e. cgo) — a planned follow-up.
 
 ## Port 80 — bare `http://<name>.local`
 
