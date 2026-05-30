@@ -27,6 +27,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Alias is one dedicated IP to give the service on a specific interface — one
@@ -110,19 +111,57 @@ func (o *Options) applyDefaults() {
 	}
 }
 
+// isToken reports whether s is non-empty and made only of [A-Za-z0-9] plus the
+// runes in extra. It rejects whitespace, path separators, and shell/pf-rule
+// metacharacters — important because these values run as root command
+// arguments, are interpolated into a pf ruleset, and (Name) become a
+// filesystem path. Keeping them to a strict charset closes argument/rule
+// injection and path traversal at the source.
+func isToken(s, extra string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune(extra, r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (o *Options) validate() error {
-	if o.Name == "" {
-		return fmt.Errorf("Name is required")
+	// Name becomes a directory, an nftables table, and a pf anchor segment, so
+	// restrict it to a path- and shell-safe charset.
+	if !isToken(o.Name, "_-") {
+		return fmt.Errorf("Name %q must be non-empty and only contain letters, digits, '_' or '-'", o.Name)
 	}
 	if len(o.Aliases) == 0 {
 		return fmt.Errorf("at least one alias IP is required")
 	}
 	for _, a := range o.Aliases {
-		if a.Iface == "" {
-			return fmt.Errorf("alias %s has no interface", a.AliasIP)
+		// Iface is interpolated into the pf ruleset fed to `pfctl -f -`, so a
+		// newline or space would let it inject rules; restrict to real
+		// interface-name characters.
+		if !isToken(a.Iface, "._:-") {
+			return fmt.Errorf("interface %q is not a valid interface name", a.Iface)
 		}
 		if ip := net.ParseIP(a.AliasIP); ip == nil || ip.To4() == nil {
 			return fmt.Errorf("%q is not a valid IPv4 address", a.AliasIP)
+		}
+		if a.Prefix < 1 || a.Prefix > 32 {
+			return fmt.Errorf("prefix for %s must be 1–32 (got %d)", a.AliasIP, a.Prefix)
+		}
+		maskIP := net.ParseIP(a.Mask)
+		if maskIP == nil || maskIP.To4() == nil {
+			return fmt.Errorf("mask %q for %s is not a valid IPv4 address", a.Mask, a.AliasIP)
+		}
+		// Reject non-contiguous masks (e.g. 255.0.255.0): Size() returns
+		// (0, 0) for a non-canonical mask, (ones, 32) for a valid one.
+		if _, bits := net.IPMask(maskIP.To4()).Size(); bits != 32 {
+			return fmt.Errorf("mask %q for %s is not a contiguous netmask", a.Mask, a.AliasIP)
 		}
 	}
 	if o.Port < 1 || o.Port > 65535 || o.ToPort < 1 || o.ToPort > 65535 {
@@ -191,6 +230,11 @@ func requireRoot() error {
 }
 
 func statePath(name string) (string, error) {
+	// Guard here too: name reaches statePath via Down/Status without going
+	// through validate(), and it becomes a filesystem path.
+	if !isToken(name, "_-") {
+		return "", fmt.Errorf("invalid name %q", name)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err

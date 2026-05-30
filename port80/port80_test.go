@@ -19,20 +19,43 @@ func TestApplyDefaults(t *testing.T) {
 func TestValidate(t *testing.T) {
 	good := Options{Name: "fwrd", Port: 80, ToPort: 8080,
 		Aliases: []Alias{{Iface: "en0", AliasIP: "192.168.1.240"}}}
+	good.applyDefaults() // Up applies defaults (prefix/mask) before validate
 	if err := good.validate(); err != nil {
 		t.Fatalf("good.validate: %v", err)
 	}
+	full := []Alias{{Iface: "en0", AliasIP: "192.168.1.240", Prefix: 24, Mask: "255.255.255.0"}}
 	bad := []Options{
-		{Port: 80, ToPort: 8080, Aliases: []Alias{{Iface: "en0", AliasIP: "192.168.1.240"}}}, // no name
-		{Name: "x", Port: 80, ToPort: 8080},                                                  // no aliases
-		{Name: "x", Port: 80, ToPort: 8080, Aliases: []Alias{{AliasIP: "192.168.1.240"}}},    // no iface
-		{Name: "x", Port: 80, ToPort: 8080, Aliases: []Alias{{Iface: "en0", AliasIP: "nope"}}},
-		{Name: "x", Port: 0, ToPort: 8080, Aliases: []Alias{{Iface: "en0", AliasIP: "192.168.1.240"}}},
+		{Port: 80, ToPort: 8080, Aliases: full}, // no name
+		{Name: "x", Port: 80, ToPort: 8080},     // no aliases
+		{Name: "x", Port: 80, ToPort: 8080, Aliases: []Alias{{AliasIP: "192.168.1.240", Prefix: 24, Mask: "255.255.255.0"}}}, // no iface
+		{Name: "x", Port: 80, ToPort: 8080, Aliases: []Alias{{Iface: "en0", AliasIP: "nope", Prefix: 24, Mask: "255.255.255.0"}}},
+		{Name: "x", Port: 0, ToPort: 8080, Aliases: full},                                                                                             // bad port
+		{Name: "../etc", Port: 80, ToPort: 8080, Aliases: full},                                                                                       // path-traversal name
+		{Name: "x", Port: 80, ToPort: 8080, Aliases: []Alias{{Iface: "en0\nblock all", AliasIP: "192.168.1.240", Prefix: 24, Mask: "255.255.255.0"}}}, // pf injection
 	}
 	for i, o := range bad {
 		if err := o.validate(); err == nil {
 			t.Errorf("bad[%d] validate: expected error", i)
 		}
+	}
+}
+
+func TestStatePathRejectsUnsafeName(t *testing.T) {
+	for _, bad := range []string{"", "../etc", "a/b", "x.y", "name with space", ".hidden"} {
+		if _, err := statePath(bad); err == nil {
+			t.Errorf("statePath(%q): expected rejection", bad)
+		}
+	}
+	if _, err := statePath("fwrd"); err != nil {
+		t.Errorf("statePath(%q): unexpected error %v", "fwrd", err)
+	}
+}
+
+func TestValidateRejectsNonContiguousMask(t *testing.T) {
+	o := Options{Name: "x", Port: 80, ToPort: 8080,
+		Aliases: []Alias{{Iface: "en0", AliasIP: "192.168.1.240", Prefix: 24, Mask: "255.0.255.0"}}}
+	if err := o.validate(); err == nil {
+		t.Fatal("expected rejection of non-contiguous netmask 255.0.255.0")
 	}
 }
 
