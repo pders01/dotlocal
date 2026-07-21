@@ -78,13 +78,66 @@ adv, _ := mdns.AdvertiseScoped("fwrd", 80, ips, mdns.Options{})
 derives the interface from an alias IP's subnet so callers can make `--iface`
 optional. Linux and macOS only; `Supported()` reports availability.
 
+A recorded binding can also silently stop being true — VPNs and security
+products flush or disable the firewall without asking. `port80.Verify` checks
+the live system against the record, and `port80.Reassert` converges it back
+(re-adding missing aliases, reloading the ruleset in place, re-enabling a
+disabled pf without leaking enable references).
+
+## Local-only mode — this machine, no network
+
+For services that should be reachable *only from the machine itself* (dev
+dashboards, admin UIs), `mdns.AdvertiseLocal` registers `<name>.local` with
+the host resolver's LocalOnly scope instead of multicasting it: local
+processes resolve it instantly, and nothing ever appears on any network.
+Pair it with a `port80` binding on a loopback alias (e.g. `127.0.0.2` on
+`lo0`) for a bare `http://<name>.local`.
+
+This replaces the tempting-but-broken `/etc/hosts` approach: a hosts entry
+under `.local` answers only the A lookup, so every dual-stack resolve still
+multicasts the AAAA query and stalls for the full mDNS timeout (~5s).
+`AdvertiseLocal` registers both an A and an AAAA, so both address families
+answer in milliseconds. macOS only (it drives mDNSResponder's LocalOnly
+interface); see [CAVEATS.md](CAVEATS.md) for the full story.
+
+## The CLI — dotlocal for non-Go services
+
+`cmd/dotlocal` packages all of the above for services written in anything:
+
+```
+go install github.com/pders01/dotlocal/cmd/dotlocal@latest
+
+# one-shot binding (root):
+sudo dotlocal up   --name myapp --ip 127.0.0.2 --to-port 8080 --local
+sudo dotlocal down --name myapp
+dotlocal status    --name myapp        # prints the record + whether it's in force
+
+# long-running keeper: binding + mDNS registration + self-healing
+sudo dotlocal keep --name myapp --ip 127.0.0.2 --to-port 8080 --local
+
+# install the keeper as a system service (launchd/systemd), surviving reboots:
+sudo dotlocal service install   --name myapp --ip 127.0.0.2 --to-port 8080 --local
+sudo dotlocal service uninstall --name myapp
+```
+
+`keep` owns the mDNS registration (records live exactly as long as the
+process) and re-asserts the binding on a timer (default 10m), healing after
+anything flushes or disables the firewall. `service install` always rewrites
+the launchd plist / systemd unit and reloads it, so re-running it is also the
+repair and upgrade procedure — a definition written once and left alone rots
+when paths change (see [CAVEATS.md](CAVEATS.md)).
+
+Omit `--local` for LAN mode: alias IPs on the matching LAN interfaces,
+advertised over real multicast, one scoped registration per interface.
+
 ## Packages
 
 | Package | What |
 |---|---|
 | `dotlocal` | `Run(ctx, Config)` — bind + advertise + serve + graceful shutdown |
-| `dotlocal/mdns` | scoped multi-interface `<name>.local` advertising (`Advertise`, `AdvertiseScoped`) |
-| `dotlocal/port80` | alias IP + firewall redirect for bare public port(s) — 80, optionally 443 (root) |
+| `dotlocal/mdns` | scoped multi-interface `<name>.local` advertising (`Advertise`, `AdvertiseScoped`) and host-local registration (`AdvertiseLocal`) |
+| `dotlocal/port80` | alias IP + firewall redirect for bare public port(s) — 80, optionally 443 (root); `Verify`/`Reassert` for self-healing |
+| `cmd/dotlocal` | the CLI: `up`/`down`/`status`, the `keep` daemon, `service install/uninstall` (launchd/systemd) |
 
 ## Example
 
@@ -105,8 +158,9 @@ require root.
 
 ## Status
 
-Extracted from [fwrd](https://github.com/pders01/fwrd). A `service` package
-(install as a systemd/launchd user service) is planned.
+Extracted from [fwrd](https://github.com/pders01/fwrd). Service persistence
+lives in the CLI (`dotlocal service install`); the hard-won failure modes
+behind the design are collected in [CAVEATS.md](CAVEATS.md).
 
 ## License
 
