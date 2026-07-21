@@ -123,6 +123,94 @@ func pfLoadAnchor(anchor, rules string) error {
 	return nil
 }
 
+// hasAlias reports whether the interface currently carries the alias IP.
+// ifconfig prints each IPv4 address as "inet <ip> "; the trailing space keeps
+// 127.0.0.2 from matching 127.0.0.20.
+func hasAlias(a Alias) (bool, error) {
+	out, err := output("ifconfig", a.Iface)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", a.Iface, err)
+	}
+	return strings.Contains(out, "inet "+a.AliasIP+" "), nil
+}
+
+// pfEnabled reports whether pf is currently enabled.
+func pfEnabled() (bool, error) {
+	out, err := output("pfctl", "-s", "info")
+	if err != nil {
+		return false, fmt.Errorf("reading pf status: %w", err)
+	}
+	return strings.Contains(out, "Status: Enabled"), nil
+}
+
+// verifyUp checks the three legs a working binding stands on: the alias IPs
+// exist, the sub-anchor still holds redirect rules, and pf is enabled.
+func verifyUp(s *State) error {
+	for _, a := range s.Aliases {
+		ok, err := hasAlias(a)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("alias IP %s is missing from %s", a.AliasIP, a.Iface)
+		}
+	}
+	out, err := output("pfctl", "-a", pfSubAnchor(s.Name), "-sn")
+	if err != nil {
+		return fmt.Errorf("reading pf sub-anchor %s: %w", pfSubAnchor(s.Name), err)
+	}
+	if !strings.Contains(out, "rdr") {
+		return fmt.Errorf("pf sub-anchor %s holds no redirect rules (flushed by a pf reload?)", pfSubAnchor(s.Name))
+	}
+	on, err := pfEnabled()
+	if err != nil {
+		return err
+	}
+	if !on {
+		return fmt.Errorf("pf is disabled")
+	}
+	return nil
+}
+
+// reapply converges the system to the recorded state in place: absent aliases
+// are re-added, the sub-anchor is reloaded (idempotent — loading replaces its
+// contents), and pf is re-enabled only if something disabled it, taking a
+// fresh enable token then. Re-enabling unconditionally would leak a pf
+// reference per heal; keeping the old token while pf is up costs nothing
+// (a stale token just makes the eventual `pfctl -X` a no-op).
+func reapply(s *State) error {
+	for _, a := range s.Aliases {
+		ok, err := hasAlias(a)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			_ = run("route", "-n", "delete", a.AliasIP)
+			if err := run("ifconfig", aliasAddArgs(a)...); err != nil {
+				return fmt.Errorf("re-adding alias IP %s: %w", a.AliasIP, err)
+			}
+		}
+	}
+	if err := ensureAppleRdrAnchor(); err != nil {
+		return err
+	}
+	if err := pfLoadAnchor(pfSubAnchor(s.Name), renderPFAnchor(&s.Options)); err != nil {
+		return err
+	}
+	on, err := pfEnabled()
+	if err != nil {
+		return err
+	}
+	if !on {
+		tok, err := output("pfctl", "-E")
+		if err != nil {
+			return fmt.Errorf("re-enabling pf: %w", err)
+		}
+		s.PFToken = parsePFToken(tok)
+	}
+	return nil
+}
+
 func applyDown(s *State) error {
 	var firstErr error
 	note := func(e error) {

@@ -267,6 +267,61 @@ func Down(name string) (*State, error) {
 // Status returns the active binding for name, or ErrNoBinding if none.
 func Status(name string) (*State, error) { return loadState(name) }
 
+// Verify checks that the recorded binding for name is actually in force —
+// alias IPs present, redirect rules loaded, firewall enabled — and returns
+// nil when it is. A recorded binding can silently stop working without Down
+// ever running: VPNs and security products reload or disable the firewall,
+// and a flush drops the redirect while the state file still says "active".
+// Root only (both the state file and the firewall are root-readable).
+func Verify(name string) error {
+	if !supported {
+		return ErrUnsupported
+	}
+	if err := requireRoot(); err != nil {
+		return err
+	}
+	st, err := loadState(name)
+	if err != nil {
+		return err
+	}
+	if verr := st.Options.validate(); verr != nil {
+		return fmt.Errorf("state %s is invalid: %w", name, verr)
+	}
+	return verifyUp(st)
+}
+
+// Reassert converges the live system back to the recorded binding without
+// tearing traffic down first: missing alias IPs are re-added, the redirect
+// ruleset is reloaded in place, and a disabled firewall is re-enabled (on
+// macOS refreshing the stored pf enable token — the old reference died with
+// whatever disabled pf). It is idempotent; keepers call it on a timer to heal
+// after outside interference. Root only.
+func Reassert(name string) (*State, error) {
+	if !supported {
+		return nil, ErrUnsupported
+	}
+	if err := requireRoot(); err != nil {
+		return nil, err
+	}
+	st, err := loadState(name)
+	if err != nil {
+		return nil, err
+	}
+	if verr := st.Options.validate(); verr != nil {
+		return nil, fmt.Errorf("refusing to act on invalid state %s: %w", name, verr)
+	}
+	if st.PFToken != "" && !isToken(st.PFToken, "") {
+		return nil, fmt.Errorf("refusing to act on invalid pf token in state %s", name)
+	}
+	if err := reapply(st); err != nil {
+		return nil, err
+	}
+	if err := saveState(st); err != nil {
+		return st, fmt.Errorf("recording state: %w", err)
+	}
+	return st, nil
+}
+
 func requireRoot() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root")

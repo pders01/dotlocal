@@ -5,6 +5,7 @@ package port80
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Linux uses iproute2 for the alias IPs and nftables for the redirect. The
@@ -83,6 +84,65 @@ func applyUp(o *Options) (*State, error) {
 		}
 	}
 	return st, nil
+}
+
+// hasAlias reports whether the interface currently carries the alias IP.
+// `ip -4 addr show` prints each address as "inet <ip>/<prefix>"; matching
+// through the slash keeps 10.0.0.2 from matching 10.0.0.20.
+func hasAlias(a Alias) (bool, error) {
+	out, err := output("ip", "-4", "addr", "show", "dev", a.Iface)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", a.Iface, err)
+	}
+	return strings.Contains(out, "inet "+a.AliasIP+"/"), nil
+}
+
+// verifyUp checks that the alias IPs exist and the redirect table still holds
+// its rules (nftables has no global disable, so there is no third leg).
+func verifyUp(s *State) error {
+	for _, a := range s.Aliases {
+		ok, err := hasAlias(a)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("alias IP %s is missing from %s", a.AliasIP, a.Iface)
+		}
+	}
+	out, err := output("nft", "list", "table", "ip", s.Name)
+	if err != nil {
+		return fmt.Errorf("redirect table %s is missing: %w", s.Name, err)
+	}
+	if !strings.Contains(out, "dport") {
+		return fmt.Errorf("redirect table %s holds no rules", s.Name)
+	}
+	return nil
+}
+
+// reapply converges the system to the recorded state: absent aliases are
+// re-added, and the redirect table is dropped and rebuilt — `nft add rule`
+// appends, so reloading in place would stack duplicates.
+func reapply(s *State) error {
+	for _, a := range s.Aliases {
+		ok, err := hasAlias(a)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if err := run("ip", aliasAddArgs(a)...); err != nil {
+				return fmt.Errorf("re-adding alias IP %s: %w", a.AliasIP, err)
+			}
+		}
+	}
+	_ = run("nft", nftDelTableArgs(s.Name)...)
+	steps := [][]string{nftAddTableArgs(s.Name), nftAddChainArgs(s.Name)}
+	steps = append(steps, nftRuleSteps(s.Name, &s.Options)...)
+	for _, args := range steps {
+		if err := run("nft", args...); err != nil {
+			return fmt.Errorf("reinstalling nftables redirect: %w", err)
+		}
+	}
+	return nil
 }
 
 func applyDown(s *State) error {
