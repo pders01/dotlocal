@@ -116,6 +116,41 @@ func AdvertiseScoped(name string, port int, ips []net.IP, opts Options) (*Advert
 	return build(name, port, opts.info(name), byIface, order)
 }
 
+// AdvertiseLocal registers <name>.local with this machine's resolver only:
+// the records answer local processes and never appear on any network. Use it
+// to name loopback-alias services (e.g. a port80 redirect on 127.0.0.x)
+// without an /etc/hosts entry — a hosts-file entry under .local answers only
+// the A lookup, so every dual-stack resolve still multicasts the AAAA query
+// and stalls for the full mDNS timeout (~5s). A real registration answers
+// both families instantly (the A records are paired with an AAAA for ::1; a
+// client that tries ::1 first is refused immediately and falls back).
+//
+// All ips must be loopback IPv4 addresses. macOS only (mDNSResponder's
+// LocalOnly pseudo-interface); other platforms return an error.
+func AdvertiseLocal(name string, port int, ips []net.IP, opts Options) (*Advertiser, error) {
+	var v4 []net.IP
+	for _, ip := range ips {
+		ip4 := ip.To4()
+		if ip4 == nil || !ip4.IsLoopback() {
+			return nil, fmt.Errorf("local-only advertising requires loopback IPv4 addresses (got %s)", ip)
+		}
+		v4 = append(v4, ip4)
+	}
+	if len(v4) == 0 {
+		return nil, fmt.Errorf("no loopback IPv4 address to register")
+	}
+	host := name + ".local."
+	closer, err := startLocalResponder(name, host, port, opts.info(name), v4, []net.IP{net.IPv6loopback})
+	if err != nil {
+		return nil, err
+	}
+	adv := &Advertiser{Host: host, closers: []func() error{closer}}
+	for _, ip := range v4 {
+		adv.Targets = append(adv.Targets, "local="+ip.String())
+	}
+	return adv, nil
+}
+
 // build creates one responder per interface via the platform's startResponder
 // and assembles the Advertiser.
 func build(name string, port int, info string, byIface map[string][]net.IP, order []string) (*Advertiser, error) {

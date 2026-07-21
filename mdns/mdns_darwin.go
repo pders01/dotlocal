@@ -25,6 +25,21 @@ static DNSServiceErrorType dl_regA(DNSServiceRef ref, uint32_t ifindex,
         host, kDNSServiceType_A, kDNSServiceClass_IN, 4, ip4, 120, dl_regCb, NULL);
 }
 
+// dl_regAAAA is dl_regA for an IPv6 address. Local-only registrations pair the
+// loopback A record with an AAAA so a dual-stack lookup gets both answers
+// immediately instead of multicasting the missing type and waiting out the
+// mDNS timeout.
+static DNSServiceErrorType dl_regAAAA(DNSServiceRef ref, uint32_t ifindex,
+                                      const char *host, const unsigned char *ip6) {
+    DNSRecordRef rec;
+    return DNSServiceRegisterRecord(ref, &rec, kDNSServiceFlagsShared, ifindex,
+        host, kDNSServiceType_AAAA, kDNSServiceClass_IN, 16, ip6, 120, dl_regCb, NULL);
+}
+
+// kDNSServiceInterfaceIndexLocalOnly is a macro expanding to ((uint32_t)-1),
+// which cgo cannot import as a constant; surface it as a plain value.
+static const uint32_t dl_ifLocalOnly = kDNSServiceInterfaceIndexLocalOnly;
+
 // A no-op service-registration callback (DNSServiceRegister also requires one).
 static void dl_regSvcCb(DNSServiceRef s, DNSServiceFlags f, DNSServiceErrorType e,
                         const char *n, const char *t, const char *d, void *ctx) {
@@ -70,6 +85,31 @@ import (
 //
 // The returned closer removes the registrations.
 func startResponder(name, host string, port int, info, ifaceName string, ips []net.IP) (func() error, error) {
+	// Resolve the interface index up front: a zero index is
+	// kDNSServiceInterfaceIndexAny, which would register the A record on every
+	// interface and silently defeat the per-LAN scoping this whole design rests
+	// on. Fail loudly instead of advertising on the wrong segments.
+	ifi, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return nil, fmt.Errorf("mdns: looking up interface %s: %w", ifaceName, err)
+	}
+	return register(name, host, port, info, C.uint32_t(ifi.Index), ifaceName, ips, nil)
+}
+
+// startLocalResponder registers with mDNSResponder's LocalOnly
+// pseudo-interface: the records answer queries from this machine only and are
+// never sent on any network. Alongside the A records it registers the given
+// AAAA records (typically ::1), because mDNSResponder is not authoritative
+// for a LocalOnly name — a dual-stack lookup that finds only an A record
+// still multicasts the AAAA query and stalls for the full mDNS timeout.
+func startLocalResponder(name, host string, port int, info string, ip4s, ip6s []net.IP) (func() error, error) {
+	return register(name, host, port, info, C.dl_ifLocalOnly, "local-only", ip4s, ip6s)
+}
+
+// register drives the shared dns_sd connection for one scope (a real
+// interface index or LocalOnly): A/AAAA records, the _http._tcp service, and
+// the reply pump. scope names the target in errors.
+func register(name, host string, port int, info string, ifindex C.uint32_t, scope string, ip4s, ip6s []net.IP) (func() error, error) {
 	var ref C.DNSServiceRef
 	if e := C.DNSServiceCreateConnection(&ref); e != C.kDNSServiceErr_NoError {
 		return nil, fmt.Errorf("mdns: DNSServiceCreateConnection failed (%d)", int(e))
@@ -79,18 +119,7 @@ func startResponder(name, host string, port int, info, ifaceName string, ips []n
 	cHost := C.CString(fqdn)
 	defer C.free(unsafe.Pointer(cHost))
 
-	// Resolve the interface index up front: a zero index is
-	// kDNSServiceInterfaceIndexAny, which would register the A record on every
-	// interface and silently defeat the per-LAN scoping this whole design rests
-	// on. Fail loudly instead of advertising on the wrong segments.
-	ifi, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		C.DNSServiceRefDeallocate(ref)
-		return nil, fmt.Errorf("mdns: looking up interface %s: %w", ifaceName, err)
-	}
-	ifindex := C.uint32_t(ifi.Index)
-
-	for _, ip := range ips {
+	for _, ip := range ip4s {
 		ip4 := ip.To4()
 		if ip4 == nil {
 			continue
@@ -100,7 +129,20 @@ func startResponder(name, host string, port int, info, ifaceName string, ips []n
 		C.free(unsafe.Pointer(cip))
 		if e != C.kDNSServiceErr_NoError {
 			C.DNSServiceRefDeallocate(ref)
-			return nil, fmt.Errorf("mdns: registering %s on %s failed (%d)", ip4, ifaceName, int(e))
+			return nil, fmt.Errorf("mdns: registering %s on %s failed (%d)", ip4, scope, int(e))
+		}
+	}
+	for _, ip := range ip6s {
+		ip16 := ip.To16()
+		if ip16 == nil || ip.To4() != nil {
+			continue
+		}
+		cip := (*C.uchar)(C.CBytes(ip16))
+		e := C.dl_regAAAA(ref, ifindex, cHost, cip)
+		C.free(unsafe.Pointer(cip))
+		if e != C.kDNSServiceErr_NoError {
+			C.DNSServiceRefDeallocate(ref)
+			return nil, fmt.Errorf("mdns: registering %s on %s failed (%d)", ip, scope, int(e))
 		}
 	}
 
@@ -115,7 +157,7 @@ func startResponder(name, host string, port int, info, ifaceName string, ips []n
 	if e := C.dl_register(ref, &svcRef, ifindex, cName, cHost,
 		C.uint16_t(port), C.uint16_t(len(txt)), cTXT); e != C.kDNSServiceErr_NoError {
 		C.DNSServiceRefDeallocate(ref)
-		return nil, fmt.Errorf("mdns: registering _http._tcp for %s on %s failed (%d)", name, ifaceName, int(e))
+		return nil, fmt.Errorf("mdns: registering _http._tcp for %s on %s failed (%d)", name, scope, int(e))
 	}
 
 	// Pump the connection so the daemon's replies are drained. ProcessResult

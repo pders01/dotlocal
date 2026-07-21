@@ -27,3 +27,11 @@ func startResponder(name, host string, port int, info, ifaceName string, ips []n
 	}
 	return srv.Shutdown, nil
 }
+
+// startLocalResponder has no backend here: host-local registrations need a
+// system resolver that serves them to local clients (macOS mDNSResponder's
+// LocalOnly interface). A self-hosted multicast responder is inherently
+// network-visible, which is the opposite of what local-only promises.
+func startLocalResponder(_, _ string, _ int, _ string, _, _ []net.IP) (func() error, error) {
+	return nil, fmt.Errorf("mdns: local-only advertising is only supported on macOS")
+}
