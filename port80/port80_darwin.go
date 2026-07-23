@@ -143,8 +143,115 @@ func pfEnabled() (bool, error) {
 	return strings.Contains(out, "Status: Enabled"), nil
 }
 
-// verifyUp checks the three legs a working binding stands on: the alias IPs
-// exist, the sub-anchor still holds redirect rules, and pf is enabled.
+// parseSkippedIfaces extracts the interfaces flagged `skip` from
+// `pfctl -s Interfaces -v` output, whose lines read "lo0 (skip)". A skipped
+// interface is exempt from pf entirely: rules on it stay loaded and visible
+// but are never evaluated. Pure for testing.
+func parseSkippedIfaces(out string) map[string]bool {
+	skipped := make(map[string]bool)
+	for line := range strings.SplitSeq(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[1] == "(skip)" {
+			skipped[f[0]] = true
+		}
+	}
+	return skipped
+}
+
+// skippedAliasIfaces returns the binding's interfaces that pf currently
+// skips, deduplicated in alias order.
+func skippedAliasIfaces(s *State) ([]string, error) {
+	out, err := output("pfctl", "-s", "Interfaces", "-v")
+	if err != nil {
+		return nil, fmt.Errorf("reading pf interface flags: %w", err)
+	}
+	flagged := parseSkippedIfaces(out)
+	var hit []string
+	seen := make(map[string]bool)
+	for _, a := range s.Aliases {
+		if flagged[a.Iface] && !seen[a.Iface] {
+			hit = append(hit, a.Iface)
+			seen[a.Iface] = true
+		}
+	}
+	return hit, nil
+}
+
+// renderMainRuleset reassembles a loadable main ruleset from live pfctl dumps
+// (`-sr`, `-s nat`, `-s dummynet`), reordered into pf.conf section order:
+// scrub, translation, dummynet, filter. The point of rebuilding from the live
+// ruleset rather than reloading /etc/pf.conf is to preserve the anchor
+// attachments system services (Internet Sharing / vmnet — i.e. VM NAT) insert
+// dynamically at runtime; a stock-file reload would drop them and cut off VM
+// networking. pfctl's ALTQ stderr noise is filtered out. Pure for testing.
+func renderMainRuleset(filterDump, natDump, dummynetDump string) string {
+	var scrub, nat, dummynet, filter []string
+	section := func(dst *[]string, dump string, keep func(string) bool) {
+		for line := range strings.SplitSeq(dump, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.Contains(line, "ALTQ") || !keep(line) {
+				continue
+			}
+			*dst = append(*dst, line)
+		}
+	}
+	isScrub := func(l string) bool { return strings.HasPrefix(l, "scrub") }
+	section(&scrub, filterDump, isScrub)
+	section(&filter, filterDump, func(l string) bool { return !isScrub(l) })
+	all := func(string) bool { return true }
+	section(&nat, natDump, all)
+	section(&dummynet, dummynetDump, all)
+	lines := make([]string, 0, len(scrub)+len(nat)+len(dummynet)+len(filter))
+	for _, sec := range [][]string{scrub, nat, dummynet, filter} {
+		lines = append(lines, sec...)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// clearPFSkip drops pf's per-interface skip flags. macOS's vmnet/Internet
+// Sharing machinery (Virtualization.framework NAT — colima's vz mode, Apple's
+// `container` CLI) reloads pf on network reconfiguration and sets
+// `set skip on lo0`, after which every loopback rule is dead while looking
+// perfectly loaded. Only a main-ruleset load clears interface flags —
+// sub-anchor loads (which is all the keeper otherwise does) never touch them —
+// so the live main ruleset is dumped, reassembled, and loaded back. Sub-anchor
+// contents live outside the main ruleset and survive untouched.
+func clearPFSkip() error {
+	filterDump, err := output("pfctl", "-sr")
+	if err != nil {
+		return fmt.Errorf("dumping pf filter rules: %w", err)
+	}
+	natDump, err := output("pfctl", "-s", "nat")
+	if err != nil {
+		return fmt.Errorf("dumping pf nat rules: %w", err)
+	}
+	dummynetDump, err := output("pfctl", "-s", "dummynet")
+	if err != nil {
+		// dummynet is an Apple extension; a pfctl that can't dump it just has
+		// nothing to preserve there.
+		dummynetDump = ""
+	}
+	conf := renderMainRuleset(filterDump, natDump, dummynetDump)
+	// Refuse to load a ruleset that lost the com.apple wildcard: an empty or
+	// truncated dump would otherwise replace the main ruleset with less than
+	// what is running now.
+	if !strings.Contains(conf, `"com.apple/*"`) {
+		return fmt.Errorf("live pf ruleset dump is missing the com.apple/* anchors; refusing to reload it")
+	}
+	cmd := exec.Command("pfctl", "-f", "-")
+	cmd.Stdin = strings.NewReader(conf)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("reloading pf main ruleset: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// verifyUp checks the four legs a working binding stands on: the alias IPs
+// exist, the sub-anchor still holds redirect rules, pf is enabled, and pf is
+// not skipping the interfaces the rules match on.
 func verifyUp(s *State) error {
 	for _, a := range s.Aliases {
 		ok, err := hasAlias(a)
@@ -169,11 +276,20 @@ func verifyUp(s *State) error {
 	if !on {
 		return fmt.Errorf("pf is disabled")
 	}
+	skipped, err := skippedAliasIfaces(s)
+	if err != nil {
+		return err
+	}
+	if len(skipped) > 0 {
+		return fmt.Errorf("pf is skipping %s (`set skip` flag — the redirect rules are loaded but never evaluated)",
+			strings.Join(skipped, ", "))
+	}
 	return nil
 }
 
 // reapply converges the system to the recorded state in place: absent aliases
-// are re-added, the sub-anchor is reloaded (idempotent — loading replaces its
+// are re-added, a skip flag on any of the binding's interfaces is cleared (see
+// clearPFSkip), the sub-anchor is reloaded (idempotent — loading replaces its
 // contents), and pf is re-enabled only if something disabled it, taking a
 // fresh enable token then. Re-enabling unconditionally would leak a pf
 // reference per heal; keeping the old token while pf is up costs nothing
@@ -193,6 +309,13 @@ func reapply(s *State) error {
 	}
 	if err := ensureAppleRdrAnchor(); err != nil {
 		return err
+	}
+	if skipped, err := skippedAliasIfaces(s); err != nil {
+		return err
+	} else if len(skipped) > 0 {
+		if err := clearPFSkip(); err != nil {
+			return fmt.Errorf("clearing pf skip flag on %s: %w", strings.Join(skipped, ", "), err)
+		}
 	}
 	if err := pfLoadAnchor(pfSubAnchor(s.Name), renderPFAnchor(&s.Options)); err != nil {
 		return err

@@ -70,6 +70,62 @@ func TestParsePFToken(t *testing.T) {
 	}
 }
 
+// The skip/ruleset fixtures below are verbatim pfctl output captured from a
+// real incident (2026-07-23): vmnet/Internet Sharing had set `skip on lo0`,
+// leaving perfectly loaded loopback redirects that were never evaluated.
+
+func TestParseSkippedIfaces(t *testing.T) {
+	out := "No ALTQ support in kernel\nALTQ related functions disabled\n" +
+		"ALL\nanpi0\nap1\nbridge100\nen0\nlo0 (skip)\nstf0\nutun0\nvmenet0\n"
+	skipped := parseSkippedIfaces(out)
+	if !skipped["lo0"] {
+		t.Fatal("lo0 should be flagged as skipped")
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("only lo0 should be skipped, got %v", skipped)
+	}
+}
+
+func TestParseSkippedIfacesNone(t *testing.T) {
+	if got := parseSkippedIfaces("ALL\nen0\nlo0\n"); len(got) != 0 {
+		t.Fatalf("no interface is skipped, got %v", got)
+	}
+}
+
+func TestRenderMainRuleset(t *testing.T) {
+	filterDump := "No ALTQ support in kernel\nALTQ related functions disabled\n" +
+		"scrub-anchor \"com.apple/*\" all fragment reassemble\n" +
+		"scrub-anchor \"com.apple.internet-sharing\" all fragment reassemble\n" +
+		"anchor \"com.apple/*\" all\n" +
+		"anchor \"com.apple.internet-sharing\" all\n"
+	natDump := "No ALTQ support in kernel\nALTQ related functions disabled\n" +
+		"nat-anchor \"com.apple/*\" all\n" +
+		"nat-anchor \"com.apple.internet-sharing\" all\n" +
+		"rdr-anchor \"com.apple/*\" all\n" +
+		"rdr-anchor \"com.apple.internet-sharing\" all\n"
+	dummynetDump := "dummynet-anchor \"com.apple/*\" all\n"
+	want := "scrub-anchor \"com.apple/*\" all fragment reassemble\n" +
+		"scrub-anchor \"com.apple.internet-sharing\" all fragment reassemble\n" +
+		"nat-anchor \"com.apple/*\" all\n" +
+		"nat-anchor \"com.apple.internet-sharing\" all\n" +
+		"rdr-anchor \"com.apple/*\" all\n" +
+		"rdr-anchor \"com.apple.internet-sharing\" all\n" +
+		"dummynet-anchor \"com.apple/*\" all\n" +
+		"anchor \"com.apple/*\" all\n" +
+		"anchor \"com.apple.internet-sharing\" all\n"
+	if got := renderMainRuleset(filterDump, natDump, dummynetDump); got != want {
+		t.Fatalf("renderMainRuleset:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestRenderMainRulesetEmpty(t *testing.T) {
+	// Empty dumps must render empty (not "\n"), so clearPFSkip's com.apple/*
+	// guard is the only thing standing between a truncated dump and a wipe.
+	if got := renderMainRuleset("", "No ALTQ support in kernel\n", ""); got != "" {
+		t.Fatalf("empty dumps should render empty, got %q", got)
+	}
+}
+
 func TestRenderPFAnchorContains(t *testing.T) {
 	o := &Options{Name: "x", Port: 80, Ports: []int{80}, ToPort: 8080, Aliases: []Alias{{Iface: "en0", AliasIP: "10.0.0.5"}}}
 	if !strings.Contains(renderPFAnchor(o), "to 10.0.0.5 port 80 -> 10.0.0.5 port 8080") {

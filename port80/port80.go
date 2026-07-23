@@ -268,10 +268,12 @@ func Down(name string) (*State, error) {
 func Status(name string) (*State, error) { return loadState(name) }
 
 // Verify checks that the recorded binding for name is actually in force —
-// alias IPs present, redirect rules loaded, firewall enabled — and returns
-// nil when it is. A recorded binding can silently stop working without Down
-// ever running: VPNs and security products reload or disable the firewall,
-// and a flush drops the redirect while the state file still says "active".
+// alias IPs present, redirect rules loaded, firewall enabled, and (macOS) no
+// pf `skip` flag on the binding's interfaces — and returns nil when it is. A
+// recorded binding can silently stop working without Down ever running: VPNs
+// and security products reload or disable the firewall, a flush drops the
+// redirect while the state file still says "active", and macOS's vmnet stack
+// can mark loopback as skipped so loaded rules are never evaluated.
 // Root only (both the state file and the firewall are root-readable).
 func Verify(name string) error {
 	if !supported {

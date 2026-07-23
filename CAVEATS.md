@@ -57,6 +57,28 @@ reload or disable pf without asking. Two consequences:
 editing `/etc/pf.conf`, so an OS update rewriting that file can't orphan the
 rules — but a flush can still empty the sub-anchor, hence the keeper.
 
+## `set skip on lo0` makes perfect-looking rules do nothing
+
+Flushing isn't the only way pf rules die. macOS's vmnet / Internet Sharing
+machinery (Virtualization.framework NAT — colima with `vmType: vz`, Apple's
+`container` CLI; look for `bridge100`, `vmenet0`, `/usr/libexec/InternetSharing`)
+reloads pf whenever it reconfigures on a network event and sets
+**`set skip on lo0`**. A skipped interface is exempt from pf entirely, so
+every check of the *configuration* passes — rules loaded in the sub-anchor,
+wildcard anchor attached, pf enabled — while no loopback packet is ever
+evaluated. Combined with a wildcard `*:80` listener (previous section), the
+symptom is a confident 404 from the wrong server. Check
+`pfctl -s Interfaces -v` for `(skip)` when everything else looks right.
+
+Clearing the flag is its own trap: only a **main-ruleset** load resets
+interface flags (anchor loads never touch them), but reloading the stock
+`/etc/pf.conf` drops the anchor attachments those same system services insert
+dynamically at runtime — killing VM NAT. `clearPFSkip` therefore dumps the
+live main ruleset (`-sr`, `-s nat`, `-s dummynet`), reassembles it in pf.conf
+section order, and loads that back: skip flags cleared, dynamic anchors kept,
+sub-anchor contents untouched. `Verify` detects the flag and `Reassert` heals
+it, so a keeper recovers within one interval.
+
 ## When the redirect is down, the failure is confusing, not loud
 
 If anything on the host listens on the wildcard (`*:80` — colima/Lima's ssh
