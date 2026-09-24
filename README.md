@@ -47,11 +47,13 @@ mDNS, serves, and shuts down gracefully when the context is cancelled.
 
 Binding port 80 is privileged and often already taken by the host. The
 `dotlocal/port80` subpackage avoids both problems: it gives the service its own
-**alias IP** on each LAN and installs a kernel firewall redirect (pf on macOS,
+**alias IP** on each LAN and installs kernel firewall redirects (pf on macOS,
 nftables on Linux) from that IP's `:80` to your unprivileged port — before the
 socket lookup, so it works even when the host binds `0.0.0.0:80`, and never
-touches the host's own port-80 traffic. macOS uses the stock
-`rdr-anchor "com.apple/*"` sub-anchor, so `/etc/pf.conf` is never modified.
+touches the host's own port-80 traffic. On macOS, separate physical-interface
+and loopback rules make the alias work from LAN clients and the hosting Mac.
+The stock `rdr-anchor "com.apple/*"` sub-anchor is used, so `/etc/pf.conf` is
+never modified.
 
 Redirect **more than one** public port onto the same app port with `Ports`,
 e.g. `Ports: []int{80, 443}` so bare `https://<name>.local` works alongside
