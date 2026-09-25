@@ -96,6 +96,12 @@ func startResponder(name, host string, port int, info, ifaceName string, ips []n
 	return register(name, host, port, info, C.uint32_t(ifi.Index), ifaceName, ips, nil)
 }
 
+// startScopedLocal mirrors scoped LAN addresses into the host-only resolver,
+// adding ::1 so local dual-stack lookups fail over immediately to IPv4.
+func startScopedLocal(name, host string, port int, info string, ips []net.IP) (func() error, error) {
+	return startLocalResponder(name, host, port, info, ips, []net.IP{net.IPv6loopback})
+}
+
 // startLocalResponder registers with mDNSResponder's LocalOnly
 // pseudo-interface: the records answer queries from this machine only and are
 // never sent on any network. Alongside the A records it registers the given

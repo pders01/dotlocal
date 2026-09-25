@@ -88,7 +88,10 @@ func Advertise(name string, port int, opts Options) (*Advertiser, error) {
 
 // AdvertiseScoped advertises <name>.local for exactly the given IPs, each on
 // the interface whose subnet contains it. Use it to publish dedicated alias
-// IPs (e.g. from a port-80 redirect).
+// IPs (e.g. from a port-80 redirect). On macOS it also registers those A
+// records and an AAAA for ::1 on mDNSResponder's LocalOnly interface. That
+// host-only registration avoids the local resolver's AAAA timeout without
+// publishing a misleading IPv6 address to LAN clients.
 func AdvertiseScoped(name string, port int, ips []net.IP, opts Options) (*Advertiser, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -96,6 +99,7 @@ func AdvertiseScoped(name string, port int, ips []net.IP, opts Options) (*Advert
 	}
 	byIface := map[string][]net.IP{}
 	var order []string
+	var localIPs []net.IP
 	for _, ip := range ips {
 		ip4 := ip.To4()
 		if ip4 == nil {
@@ -109,11 +113,26 @@ func AdvertiseScoped(name string, port int, ips []net.IP, opts Options) (*Advert
 			order = append(order, ifn)
 		}
 		byIface[ifn] = append(byIface[ifn], ip4)
+		localIPs = append(localIPs, ip4)
 	}
 	if len(order) == 0 {
 		return nil, fmt.Errorf("no usable IPv4 address to advertise on")
 	}
-	return build(name, port, opts.info(name), byIface, order)
+	info := opts.info(name)
+	adv, err := build(name, port, info, byIface, order)
+	if err != nil {
+		return nil, err
+	}
+	localCloser, err := startScopedLocal(name, adv.Host, port, info, localIPs)
+	if err != nil {
+		_ = adv.Close()
+		return nil, fmt.Errorf("registering host-local address: %w", err)
+	}
+	adv.closers = append(adv.closers, localCloser)
+	for _, ip := range localIPs {
+		adv.Targets = append(adv.Targets, "local="+ip.String())
+	}
+	return adv, nil
 }
 
 // AdvertiseLocal registers <name>.local with this machine's resolver only:

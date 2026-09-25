@@ -23,6 +23,12 @@ interface, so both address families answer in single-digit milliseconds and
 nothing appears on any network. (A client that tries ::1 first gets an
 immediate connection-refused and falls back — that's ~0ms, not 5s.)
 
+For LAN-scoped aliases, `mdns.AdvertiseScoped` adds the equivalent A + AAAA
+pair to LocalOnly on macOS. The A record still points at the LAN alias (the
+existing host loopback redirect handles local connections), while the `::1`
+answer makes the missing-IPv6 lookup complete immediately. This local-only
+record is not multicast; remote LAN clients receive only the scoped A record.
+
 ## A record registered LocalOnly still isn't authoritative
 
 Registering only the A record LocalOnly does not stop the AAAA query from

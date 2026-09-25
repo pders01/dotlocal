@@ -102,6 +102,12 @@ multicasts the AAAA query and stalls for the full mDNS timeout (~5s).
 answer in milliseconds. macOS only (it drives mDNSResponder's LocalOnly
 interface); see [CAVEATS.md](CAVEATS.md) for the full story.
 
+On macOS, `AdvertiseScoped` also mirrors its LAN A records into LocalOnly and
+adds an AAAA for `::1`. This eliminates the same resolver stall for processes
+on the advertising machine without publishing a misleading IPv6 address to
+other LAN clients. Clients on other machines still need a real IPv6 address (or
+a resolver that can return a prompt negative AAAA response).
+
 ## The CLI — dotlocal for non-Go services
 
 `cmd/dotlocal` packages all of the above for services written in anything:

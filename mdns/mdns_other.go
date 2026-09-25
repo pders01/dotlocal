@@ -9,6 +9,10 @@ import (
 	"github.com/hashicorp/mdns"
 )
 
+func startScopedLocal(string, string, int, string, []net.IP) (func() error, error) {
+	return func() error { return nil }, nil
+}
+
 // startResponder runs a self-hosted mDNS responder bound to one interface. It
 // coexists with Avahi over the shared multicast socket (SO_REUSEADDR). Returns
 // a closer that shuts the responder down.
